@@ -1,57 +1,34 @@
-# C# loader
+# Cert issue setting up CockroachDB
 
-Start from [previous working example](../cockroach-rust-demo/README.md) using K8s CA for certificate signing.
+I am having a certificate issue that looks like it may be specific to C#/OpenSSL.
 
-Then attempt to run [this example (C#)](https://www.cockroachlabs.com/docs/stable/build-a-csharp-app-with-cockroachdb.html) with minor modifications.
+My setup is running on Windows 10 with a WSL2 Ubuntu distro. I am running the database and my test code in Docker Desktop's Kubernetes (current/recent). I chose the Kubernetes CA option for both examples.
 
-```bash
-# run this inside pod to convert PEM format to PFX
-openssl pkcs12 -inkey client.maxroach.key -password pass:$COCKROACH_CERT_PASS -in client.maxroach.crt -export -out client.maxroach.pfx
-# during debugging also tried exporting chain via '-chain' and saw 50% larger pfx file
-openssl pkcs12 -inkey client.maxroach.key -password pass:$COCKROACH_CERT_PASS -in client.maxroach.crt -export -chain -out client.maxroach.pfx
-```
+| tool           | version                  |
+| -------------- | ------------------------ |
+| Docker Desktop | Community 2.4.0.0 stable |
+| Docker Engine  | 19.03.13                 |
+| Kubernetes     | v1.18.8                  |
 
-```bash
-DOCKER_BUILDKIT=1 docker build --progress=plain -t cockroach-csharp-loader:latest .
-kubectl apply -f demo-cs.yaml
-# run 'kubectl get csr' and 'kubectl certificate approve <csr>' if not previously approved
-# fix certs (generate .pfx file, trust ca.crt), this must be run AFTER init container populates the emptydir at /cockroach-certs
-kubectl exec -it pod/demo-cs -- bash
-# the next commands are run inside the container
-./fix-certs.sh
-./bin/Debug/netcoreapp3.1/cockroach-csharp-loader
-# The c# app executed here errors out looking for a file but can't rationalize it. It DOES load the client.maxroach.pfx
-# and changing the password to not match indicates bad password. It never calls the code that is provided the "ca.crt"
-# cert file path so it must be looking elsewhere. Openssl is using "/usr/local/ssl/certs/" for its store and I've sent
-# the ca.crt there... does the name matter?
-```
+I followed the CockroachDB example linked in each README [here (Rust)](./cockroach-rust-demo/README.md) and [here (C#)](./cockroach-csharp-loader/README.md).
 
-Tried several combinations including trusting CA (official dotnet sdk debian-buster-slim container, see Dockerfile):
+The Rust example worked fine, including the DB dashboard and adding/removing nodes. The C# example is behaving strangely. Using OpenSSL, I converted the *.crt* and *.key* to *.pfx* for client.maxroach.* and it verifies when provided the *ca.crt*.
 
-```bash
-cp /cockroach-certs/* /usr/local/share/ca-certificates/
-update-ca-certificates
-cp /var/run/secrets/kubernetes.io/serviceaccount/ca.crt /usr/local/share/ca-certificates/
-update-ca-certificates
-```
+The problem appears when connecting to the server. It connects, starts the cert verifications, calls *ProvideClientCertificatesCallback()* but does not call *UserCertificateValidationCallback()*.  The error is detailed in the README and indicates that it can't find a file but not which one. I've tried:
 
-... and verified that PFX cert is being found via prinouts and trying bad password to see error change. Also verified that *UserCertificateValidationCallback()* delegate is never being called. Get this error message always:
+- trusting the cert via the main OS cert store,
+- directly dropping it in the OpenSSL dir indicated by *openssl version -d* AND also in that path + /certs,
+- copying it to various paths that might be referenced,
+- verifying that the *.pfx* IS found and decoded (it is found and a wrong password changes path taken)
+- googling and binging the error message returned many different ways for hours
+
+I am hoping someone else can chime in on why this example does not work in my containerized, repeatable environment... what's different in the example writer's environment? Also, there are some details that are omitted, like certificate placement relative to code directory or absolute or previous openssl trust steps, if any. I tried a bunch of assumptions but to no avail.
+
+I am currently digging through [this file](https://github.com/npgsql/npgsql/blob/c5812a3a5f274d1dd1700cd5bf8465ded8c00849/src/Npgsql/NpgsqlConnection.cs) to see if I can start piecing this together. I will turn on tracing soon to gather more data. I am posting this to engage anyone who may have the answer and since this will likely warrant a cautionary edit in the Cockroach C# example.
+
+The error message is:
 
 ```bash
-redacted@RyzenRig:/mnt/c/GitHub/cockroach-csharp-npgsql-issue/cockroach-csharp-loader$ kubectl apply -f demo-cs.yaml 
-pod/demo-cs created
-redacted@RyzenRig:/mnt/c/GitHub/cockroach-csharp-npgsql-issue/cockroach-csharp-loader$ kubectl exec -it pod/demo-cs -- bash
-root@demo-cs:/usr/src# ./fix_cert.sh 
-Updating certificates in /etc/ssl/certs...
-1 added, 0 removed; done.
-Running hooks in /etc/ca-certificates/update.d...
-done.
-root@demo-cs:/usr/src# ./bin/Debug/netcoreapp3.1/cockroach-csharp-loader 
-Reading from COCKROACH_CERT_FILE: /cockroach-certs/client.maxroach.pfx
-Using password from COCKROACH_CERT_PASS: password
-Total certificate bytes read: 2365
-Detected cert algorithm: 1.2.840.113549.1.1.1
-Added cert to clientCerts
 Unhandled exception. Interop+Crypto+OpenSslCryptographicException: error:2006D080:BIO routines:BIO_new_file:no such file
    at Interop.Crypto.CheckValidOpenSslHandle(SafeHandle handle)
    at Internal.Cryptography.Pal.OpenSslX509CertificateReader.FromFile(String fileName, SafePasswordHandle password, X509KeyStorageFlags keyStorageFlags)
@@ -119,62 +96,4 @@ Unhandled exception. Interop+Crypto+OpenSslCryptographicException: error:2006D08
    at Cockroach.Program.Main(String[] args) in /usr/src/Program.cs:line 23
    at Cockroach.Program.<Main>(String[] args)
 Aborted
-root@demo-cs:/usr/src# ll certs/
-total 20
-drwxrwxrwx 2 root root 4096 Oct 29 22:15 .
-drwxr-xr-x 1 root root 4096 Oct 29 22:14 ..
-lrwxrwxrwx 1 root root   52 Oct 29 22:14 ca.crt -> /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
--rw-r--r-- 1 root root 1094 Oct 29 22:14 client.maxroach.crt
--r-------- 1 root root 1679 Oct 29 22:14 client.maxroach.key
--rw------- 1 root root 2365 Oct 29 22:15 client.maxroach.pfx
-root@demo-cs:/usr/src# ll /cockroach-certs/
-total 20
-drwxrwxrwx 2 root root 4096 Oct 29 22:15 .
-drwxr-xr-x 1 root root 4096 Oct 29 22:14 ..
-lrwxrwxrwx 1 root root   52 Oct 29 22:14 ca.crt -> /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
--rw-r--r-- 1 root root 1094 Oct 29 22:14 client.maxroach.crt
--r-------- 1 root root 1679 Oct 29 22:14 client.maxroach.key
--rw------- 1 root root 2365 Oct 29 22:15 client.maxroach.pfx
-root@demo-cs:/usr/src# ll certs 
-lrwxrwxrwx 1 root root 16 Oct 29 22:11 certs -> /cockroach-certs
-root@demo-cs:/usr/src# openssl verify -verbose -show_chain -CAfile certs/ca.crt certs/client.maxroach.crt
-certs/client.maxroach.crt: OK
-Chain:
-depth=0: O = Cockroach, CN = maxroach (untrusted)
-depth=1: CN = kubernetes
-root@demo-cs:/usr/src#
-```
-
-and updated script to print out more cert info
-
-```bash
-root@demo-cs:/usr/src# ./fix_certs.sh 
-certs located before running this script
-/cockroach-certs/client.maxroach.key
-/cockroach-certs/client.maxroach.crt
-/cockroach-certs/ca.crt
-certs/client.maxroach.key
-certs/client.maxroach.crt
-certs/ca.crt
-/usr/lib/ssl/certs/ca-certificates.crt
-/usr/lib/ssl/certs/ca-certificates.crt
-Updating certificates in /etc/ssl/certs...
-rehash: warning: skipping duplicate certificate in ca.crt
-2 added, 0 removed; done.
-Running hooks in /etc/ca-certificates/update.d...
-done.
-certs sprinkled about to several locations (some may have been present before running this script)
-/cockroach-certs/client.maxroach.key
-/cockroach-certs/client.maxroach.pfx
-/cockroach-certs/client.maxroach.crt
-/cockroach-certs/ca.crt
-certs/client.maxroach.key
-certs/client.maxroach.pfx
-certs/client.maxroach.crt
-certs/ca.crt
-/usr/lib/ssl/certs/ca-certificates.crt
-/usr/lib/ssl/certs/ca.crt
-/usr/lib/ssl/ca.crt
-/usr/lib/ssl/certs/ca-certificates.crt
-/usr/lib/ssl/certs/ca.crt
 ```
