@@ -1,6 +1,6 @@
 # C# loader
 
-Start from [previous working example](../cockroach-cockroach-rust-demo/README.md) using K8s CA for certificate signing.
+Start from [previous working example](../cockroach-rust-demo/README.md) using K8s CA for certificate signing.
 
 ```bash
 # run this inside pod to convert PEM format to PFX
