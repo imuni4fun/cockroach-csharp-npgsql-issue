@@ -1,0 +1,7 @@
+# ignore everything
+**
+
+# un-ignore the following
+!Cargo.toml
+!Cargo.lock
+!src

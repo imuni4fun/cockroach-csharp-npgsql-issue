@@ -1,0 +1,6 @@
+# ignore everything
+**
+
+# un-ignore the following
+!*.csproj
+!*.cs
